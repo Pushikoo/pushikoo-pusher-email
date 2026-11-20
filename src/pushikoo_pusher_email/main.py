@@ -11,5 +11,5 @@ class EmailPusher(Pusher[AdapterConfig, InstanceConfig]):
 
     def push(self, content: Struct) -> None:
         account = self.config.accounts[self.instance_config.account]
-        client = EmailClient(account, proxies=self.ctx.get_proxies())
+        client = EmailClient(account, read_image=self.ctx.read_image)
         client.send(content, self.instance_config)

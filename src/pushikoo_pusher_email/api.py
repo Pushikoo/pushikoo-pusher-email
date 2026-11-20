@@ -1,18 +1,23 @@
 import html
 import mimetypes
-import os
 import smtplib
 import ssl
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
-from pathlib import Path
-from urllib.parse import unquote, urlparse
 
-import requests
-from pushikoo_interface import Struct, StructImage, StructText, StructTitle, StructURL
+from pushikoo_interface import (
+    AdapterFrameworkContext,
+    ImageBlob,
+    Struct,
+    StructImage,
+    StructText,
+    StructTitle,
+    StructURL,
+)
 
-from pushikoo_pusher_email.config import InstanceConfig, SMTPAccount, SecurityMode
+from pushikoo_pusher_email.config import InstanceConfig, SecurityMode, SMTPAccount
 
 
 @dataclass
@@ -44,35 +49,15 @@ def _read_image(
     source: str,
     *,
     timeout_seconds: float,
-    proxies: dict[str, str] | None,
+    read_image: Callable[..., ImageBlob],
 ) -> tuple[bytes, str, str]:
-    if source.startswith(("http://", "https://")):
-        response = requests.get(
-            source,
-            timeout=(timeout_seconds, timeout_seconds),
-            proxies=proxies,
-        )
-        response.raise_for_status()
-        filename = Path(unquote(urlparse(source).path)).name or "image"
-        content_type = (
-            response.headers.get("Content-Type", "").split(";", 1)[0]
-            or mimetypes.guess_type(filename)[0]
-            or "application/octet-stream"
-        )
-        return response.content, content_type, filename
-
-    if source.startswith("file://"):
-        parsed = urlparse(source)
-        path_text = unquote(parsed.path)
-        if parsed.netloc:
-            path_text = f"//{parsed.netloc}{path_text}"
-        elif os.name == "nt" and len(path_text) >= 3 and path_text[2] == ":":
-            path_text = path_text.lstrip("/")
-        path = Path(path_text)
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        return path.read_bytes(), content_type, path.name
-
-    raise ValueError(f"Unsupported image source: {source}")
+    image = read_image(source, timeout=timeout_seconds)
+    content_type = (
+        image.content_type
+        or mimetypes.guess_type(image.filename)[0]
+        or "application/octet-stream"
+    )
+    return image.data, content_type, image.filename
 
 
 def render_email(
@@ -81,7 +66,13 @@ def render_email(
     *,
     timeout_seconds: float,
     proxies: dict[str, str] | None = None,
+    read_image: Callable[..., ImageBlob] | None = None,
 ) -> RenderedEmail:
+    if read_image is None:
+        context = AdapterFrameworkContext()
+        context.get_proxies = lambda: proxies or {}
+        read_image = context.read_image
+
     subject = instance_config.subject
     if not subject:
         subject = next(
@@ -118,7 +109,7 @@ def render_email(
                 data, content_type, filename = _read_image(
                     element.source,
                     timeout_seconds=timeout_seconds,
-                    proxies=proxies,
+                    read_image=read_image,
                 )
                 cid = f"pushikoo-image-{len(images)}"
                 images.append(
@@ -146,9 +137,15 @@ def render_email(
 
 
 class EmailClient:
-    def __init__(self, account: SMTPAccount, proxies: dict[str, str] | None = None):
+    def __init__(
+        self,
+        account: SMTPAccount,
+        proxies: dict[str, str] | None = None,
+        read_image: Callable[..., ImageBlob] | None = None,
+    ):
         self.account = account
         self.proxies = proxies
+        self.read_image = read_image
 
     def _create_message(
         self, rendered: RenderedEmail, instance_config: InstanceConfig
@@ -189,6 +186,7 @@ class EmailClient:
             instance_config,
             timeout_seconds=self.account.timeout_seconds,
             proxies=self.proxies,
+            read_image=self.read_image,
         )
         message = self._create_message(rendered, instance_config)
         recipients = instance_config.to + instance_config.cc + instance_config.bcc

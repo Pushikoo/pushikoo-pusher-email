@@ -1,9 +1,16 @@
 from unittest.mock import Mock, patch
 
-from pushikoo_interface import Struct, StructImage, StructText, StructTitle, StructURL
-
+from pushikoo_interface import (
+    AdapterFrameworkContext,
+    ImageBlob,
+    Struct,
+    StructImage,
+    StructText,
+    StructTitle,
+    StructURL,
+)
 from pushikoo_pusher_email.api import EmailClient, render_email
-from pushikoo_pusher_email.config import InstanceConfig, SMTPAccount, SecurityMode
+from pushikoo_pusher_email.config import InstanceConfig, SecurityMode, SMTPAccount
 
 
 def test_render_email_uses_title_and_embeds_remote_image():
@@ -15,30 +22,27 @@ def test_render_email_uses_title_and_embeds_remote_image():
             StructImage(source="https://example.com/image.png", alt="Chart"),
         ]
     )
-    response = Mock(
-        content=b"image-data",
-        headers={"Content-Type": "image/png; charset=binary"},
+    read_image = Mock(
+        return_value=ImageBlob(
+            data=b"image-data",
+            content_type="image/png",
+            filename="image.png",
+        )
     )
 
-    with patch("pushikoo_pusher_email.api.requests.get", return_value=response) as get:
-        rendered = render_email(
-            content,
-            InstanceConfig(to=["to@example.com"]),
-            timeout_seconds=20,
-            proxies={"https": "http://proxy.local"},
-        )
+    rendered = render_email(
+        content,
+        InstanceConfig(to=["to@example.com"]),
+        timeout_seconds=20,
+        read_image=read_image,
+    )
 
     assert rendered.subject == "Alert"
     assert "A < B" in rendered.plain
     assert "A &lt; B" in rendered.html
     assert "cid:pushikoo-image-0" in rendered.html
     assert rendered.images[0].content_type == "image/png"
-    get.assert_called_once_with(
-        "https://example.com/image.png",
-        timeout=(20, 20),
-        proxies={"https": "http://proxy.local"},
-    )
-    response.raise_for_status.assert_called_once_with()
+    read_image.assert_called_once_with("https://example.com/image.png", timeout=20)
 
 
 def test_render_email_embeds_local_file(tmp_path):
@@ -49,6 +53,7 @@ def test_render_email_embeds_local_file(tmp_path):
         Struct(content=[StructImage(source=image_path.as_uri(), alt="Chart")]),
         InstanceConfig(to=["to@example.com"]),
         timeout_seconds=20,
+        read_image=AdapterFrameworkContext().read_image,
     )
 
     assert rendered.images[0].data == b"image-data"
